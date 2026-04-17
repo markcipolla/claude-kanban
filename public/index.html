@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Kanban</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    .card-item.selected { @apply ring-2 ring-blue-500 bg-gray-700; }
+    .prose pre { @apply bg-gray-900 p-3 rounded overflow-x-auto text-sm; }
+    .prose code { @apply text-green-400; }
+    .prose p { @apply mb-2; }
+    .prose ul, .prose ol { @apply ml-4 mb-2; }
+    .prose ul { @apply list-disc; }
+    .prose ol { @apply list-decimal; }
+    .status-badge { @apply text-xs font-medium px-2 py-0.5 rounded-full; }
+    .status-todo { @apply bg-yellow-900 text-yellow-300; }
+    .status-in_progress { @apply bg-blue-900 text-blue-300; }
+    .status-done { @apply bg-green-900 text-green-300; }
+    .chat-msg { @apply mb-3 p-3 rounded-lg text-sm; }
+    .chat-assistant { @apply bg-gray-700 border border-gray-600; }
+    .chat-tool { @apply bg-gray-800 border border-gray-700 text-gray-400 text-xs; }
+    .chat-thinking { @apply bg-gray-800 border border-purple-800 text-purple-300 text-xs italic; }
+  </style>
+</head>
+<body class="h-full bg-gray-900 text-gray-100">
+
+  <!-- Header -->
+  <header class="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center gap-4">
+    <h1 class="text-lg font-bold">Claude Kanban</h1>
+    <select id="repoSelect" class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm">
+      <option value="">All Repos</option>
+    </select>
+    <button onclick="showAddRepo()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">+ Add Repo</button>
+    <button onclick="showAddCard()" class="bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded text-sm">+ Card</button>
+  </header>
+
+  <!-- Main 2-column layout -->
+  <div class="flex h-[calc(100vh-53px)]">
+
+    <!-- Left: Card list -->
+    <div id="cardList" class="w-1/2 border-r border-gray-700 overflow-y-auto p-4 space-y-1">
+      <p class="text-gray-500 text-sm">No cards yet. Add a repo and create a card.</p>
+    </div>
+
+    <!-- Right: Card detail -->
+    <div id="cardDetail" class="w-1/2 overflow-y-auto p-6">
+      <p class="text-gray-500 text-sm">Select a card to view details.</p>
+    </div>
+  </div>
+
+  <!-- Add Repo Modal -->
+  <div id="repoModal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-gray-800 rounded-lg p-6 w-96 border border-gray-700">
+      <h2 class="text-lg font-semibold mb-4">Add Repository</h2>
+      <input id="repoPath" type="text" placeholder="/absolute/path/to/repo" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 mb-4 text-sm">
+      <div class="flex justify-end gap-2">
+        <button onclick="closeModal('repoModal')" class="px-4 py-2 rounded text-sm bg-gray-700 hover:bg-gray-600">Cancel</button>
+        <button onclick="addRepo()" class="px-4 py-2 rounded text-sm bg-blue-600 hover:bg-blue-500">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Card Modal -->
+  <div id="cardModal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-gray-800 rounded-lg p-6 w-[32rem] border border-gray-700">
+      <h2 class="text-lg font-semibold mb-4">New Card</h2>
+      <select id="cardRepo" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 mb-3 text-sm"></select>
+      <input id="cardTitle" type="text" placeholder="Card title" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 mb-3 text-sm">
+      <textarea id="cardPrompt" placeholder="Prompt (markdown)" rows="8" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 mb-4 text-sm font-mono"></textarea>
+      <div class="flex justify-end gap-2">
+        <button onclick="closeModal('cardModal')" class="px-4 py-2 rounded text-sm bg-gray-700 hover:bg-gray-600">Cancel</button>
+        <button onclick="addCard()" class="px-4 py-2 rounded text-sm bg-blue-600 hover:bg-blue-500">Create</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+let repos = [];
+let cards = [];
+let selectedCardId = null;
+let eventSource = null;
+let chatMessages = {}; // cardId -> [{type, content}]
+
+const STATUS_ORDER = { in_progress: 0, todo: 1, done: 2 };
+const STATUS_LABELS = { todo: 'Backlog', in_progress: 'In Progress', done: 'Done' };
+
+// --- Data fetching ---
+
+async function fetchRepos() {
+  repos = await (await fetch('/api/repos')).json();
+  renderRepoSelect();
+}
+
+async function fetchCards() {
+  const repoId = document.getElementById('repoSelect').value;
+  const url = repoId ? `/api/cards?repoId=${repoId}` : '/api/cards';
+  cards = await (await fetch(url)).json();
+  renderCardList();
+  if (selectedCardId) renderDetail();
+}
+
+// --- Rendering ---
+
+function renderRepoSelect() {
+  const sel = document.getElementById('repoSelect');
+  const cardRepo = document.getElementById('cardRepo');
+  sel.innerHTML = '<option value="">All Repos</option>' + repos.map(r =>
+    `<option value="${r.id}">${r.org}/${r.name}</option>`
+  ).join('');
+  cardRepo.innerHTML = repos.map(r =>
+    `<option value="${r.id}">${r.org}/${r.name}</option>`
+  ).join('');
+}
+
+function renderCardList() {
+  const el = document.getElementById('cardList');
+  if (!cards.length) {
+    el.innerHTML = '<p class="text-gray-500 text-sm">No cards yet. Add a repo and create a card.</p>';
+    return;
+  }
+
+  const sorted = [...cards].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
+
+  let currentStatus = null;
+  let html = '';
+
+  for (const card of sorted) {
+    if (card.status !== currentStatus) {
+      currentStatus = card.status;
+      html += `<div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mt-4 mb-2 first:mt-0">${STATUS_LABELS[card.status]}</div>`;
+    }
+    const repo = repos.find(r => r.id === card.repoId);
+    const isSelected = card.id === selectedCardId;
+    html += `
+      <div class="card-item cursor-pointer rounded-lg px-4 py-3 hover:bg-gray-750 hover:bg-gray-700/50 transition ${isSelected ? 'selected' : ''}"
+           onclick="selectCard('${card.id}')">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="status-badge status-${card.status}">${STATUS_LABELS[card.status]}</span>
+          <span class="text-xs text-gray-500">${repo ? repo.org + '/' + repo.name : ''}</span>
+        </div>
+        <div class="font-medium text-sm">${esc(card.title)}</div>
+        ${card.prUrl ? `<div class="text-xs text-green-400 mt-1">PR: ${esc(card.prUrl)}</div>` : ''}
+        ${card.hasSession ? '<div class="text-xs text-blue-400 mt-1">● Claude session active</div>' : ''}
+      </div>
+    `;
+  }
+
+  el.innerHTML = html;
+}
+
+function selectCard(id) {
+  selectedCardId = id;
+  renderCardList();
+  renderDetail();
+  connectSSE(id);
+}
+
+function renderDetail() {
+  const el = document.getElementById('cardDetail');
+  const card = cards.find(c => c.id === selectedCardId);
+
+  if (!card) {
+    el.innerHTML = '<p class="text-gray-500 text-sm">Select a card to view details.</p>';
+    return;
+  }
+
+  const repo = repos.find(r => r.id === card.repoId);
+  const messages = chatMessages[card.id] || [];
+
+  let html = `
+    <div class="mb-4">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="status-badge status-${card.status}">${STATUS_LABELS[card.status]}</span>
+        <span class="text-xs text-gray-500">${repo ? repo.org + '/' + repo.name : ''}</span>
+      </div>
+      <h2 class="text-xl font-bold mb-3">${esc(card.title)}</h2>
+      <div class="prose text-gray-300 mb-4 bg-gray-800 rounded-lg p-4 border border-gray-700">${marked.parse(card.prompt)}</div>
+    </div>
+  `;
+
+  // Actions
+  html += '<div class="flex gap-2 mb-4">';
+  if (card.status === 'todo') {
+    html += `<button onclick="startCard('${card.id}')" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm">▶ Start</button>`;
+  }
+  if (card.status === 'in_progress') {
+    html += `<button onclick="doneCard('${card.id}')" class="bg-green-600 hover:bg-green-500 px-4 py-2 rounded text-sm">✓ Done & PR</button>`;
+  }
+  if (card.prUrl) {
+    html += `<a href="${esc(card.prUrl)}" target="_blank" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded text-sm inline-block">Open PR ↗</a>`;
+  }
+  html += `<button onclick="deleteCard('${card.id}')" class="bg-red-900 hover:bg-red-800 px-4 py-2 rounded text-sm ml-auto">✕ Delete</button>`;
+  html += '</div>';
+
+  // Chat area (in_progress or done with history)
+  if (card.status === 'in_progress' || messages.length > 0) {
+    html += '<div class="border border-gray-700 rounded-lg overflow-hidden">';
+    html += '<div class="bg-gray-800 px-4 py-2 text-xs font-semibold text-gray-400 uppercase border-b border-gray-700">Claude Session</div>';
+    html += `<div id="chatArea" class="p-4 max-h-[40vh] overflow-y-auto space-y-2 bg-gray-850" style="background: #111827;">`;
+
+    if (messages.length === 0) {
+      html += '<p class="text-gray-500 text-sm italic">Waiting for Claude output...</p>';
+    } else {
+      for (const msg of messages) {
+        html += renderChatMessage(msg);
+      }
+    }
+
+    html += '</div>';
+
+    // Input area
+    if (card.status === 'in_progress' && card.hasSession) {
+      html += `
+        <div class="border-t border-gray-700 p-3 flex gap-2">
+          <input id="chatInput" type="text" placeholder="Send feedback to Claude..."
+                 class="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm"
+                 onkeydown="if(event.key==='Enter')sendInput('${card.id}')">
+          <button onclick="sendInput('${card.id}')" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm">Send</button>
+        </div>
+      `;
+    }
+
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+
+  // Auto-scroll chat
+  const chatArea = document.getElementById('chatArea');
+  if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function renderChatMessage(msg) {
+  if (msg.type === 'assistant') {
+    const content = msg.content?.map(b => {
+      if (b.type === 'text') return marked.parse(b.text || '');
+      if (b.type === 'tool_use') return `<div class="chat-msg chat-tool">🔧 ${esc(b.name || 'tool')}: ${esc(JSON.stringify(b.input || '').slice(0, 200))}</div>`;
+      return '';
+    }).join('') || esc(JSON.stringify(msg));
+    return `<div class="chat-msg chat-assistant prose">${content}</div>`;
+  }
+  if (msg.type === 'content_block_delta' && msg.delta?.text) {
+    return `<div class="chat-msg chat-assistant prose">${marked.parse(msg.delta.text)}</div>`;
+  }
+  if (msg.type === 'result') {
+    const text = msg.result || msg.content || '';
+    return `<div class="chat-msg chat-assistant prose">${marked.parse(typeof text === 'string' ? text : JSON.stringify(text))}</div>`;
+  }
+  if (msg.type === 'close') {
+    return '<div class="text-xs text-gray-500 italic">Session ended.</div>';
+  }
+  if (msg.type === 'error') {
+    return `<div class="text-xs text-red-400">${esc(msg.content)}</div>`;
+  }
+  // Fallback: show raw
+  if (msg.type === 'raw') {
+    return `<div class="chat-msg chat-tool">${esc(msg.content)}</div>`;
+  }
+  return '';
+}
+
+// --- SSE ---
+
+function connectSSE(cardId) {
+  if (eventSource) eventSource.close();
+
+  const card = cards.find(c => c.id === cardId);
+  if (!card || card.status !== 'in_progress') return;
+
+  if (!chatMessages[cardId]) chatMessages[cardId] = [];
+
+  eventSource = new EventSource(`/api/cards/${cardId}/stream`);
+  eventSource.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    chatMessages[cardId].push(msg);
+
+    if (msg.type === 'close') {
+      eventSource.close();
+      eventSource = null;
+      fetchCards();
+    }
+
+    if (selectedCardId === cardId) renderDetail();
+  };
+  eventSource.onerror = () => {
+    eventSource.close();
+    eventSource = null;
+  };
+}
+
+// --- Actions ---
+
+async function startCard(id) {
+  const res = await fetch(`/api/cards/${id}/start`, { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error);
+  chatMessages[id] = [];
+  await fetchCards();
+  selectCard(id);
+}
+
+async function doneCard(id) {
+  const res = await fetch(`/api/cards/${id}/done`, { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error);
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  await fetchCards();
+  renderDetail();
+}
+
+async function deleteCard(id) {
+  if (!confirm('Delete this card? This will remove the worktree and kill any Claude session.')) return;
+  await fetch(`/api/cards/${id}`, { method: 'DELETE' });
+  if (selectedCardId === id) {
+    selectedCardId = null;
+    document.getElementById('cardDetail').innerHTML = '<p class="text-gray-500 text-sm">Select a card to view details.</p>';
+  }
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  await fetchCards();
+}
+
+async function sendInput(cardId) {
+  const input = document.getElementById('chatInput');
+  if (!input || !input.value.trim()) return;
+  const text = input.value.trim();
+  chatMessages[cardId] = chatMessages[cardId] || [];
+  chatMessages[cardId].push({ type: 'user', content: text });
+  await fetch(`/api/cards/${cardId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input: text }),
+  });
+  renderDetail();
+}
+
+// --- Modals ---
+
+function showAddRepo() { document.getElementById('repoModal').classList.remove('hidden'); }
+function showAddCard() { document.getElementById('cardModal').classList.remove('hidden'); }
+function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+
+async function addRepo() {
+  const pathInput = document.getElementById('repoPath');
+  const res = await fetch('/api/repos', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: pathInput.value.trim() }),
+  });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error);
+  pathInput.value = '';
+  closeModal('repoModal');
+  await fetchRepos();
+}
+
+async function addCard() {
+  const repoId = document.getElementById('cardRepo').value;
+  const title = document.getElementById('cardTitle').value.trim();
+  const prompt = document.getElementById('cardPrompt').value.trim();
+  if (!repoId || !title || !prompt) return alert('All fields required');
+  const res = await fetch('/api/cards', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repoId, title, prompt }),
+  });
+  const data = await res.json();
+  if (!res.ok) return alert(data.error);
+  document.getElementById('cardTitle').value = '';
+  document.getElementById('cardPrompt').value = '';
+  closeModal('cardModal');
+  await fetchCards();
+  selectCard(data.id);
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+// --- Init ---
+
+document.getElementById('repoSelect').addEventListener('change', fetchCards);
+fetchRepos().then(fetchCards);
+
+// Poll for card status changes
+setInterval(fetchCards, 5000);
+</script>
+</body>
+</html>
